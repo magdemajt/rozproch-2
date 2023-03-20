@@ -418,7 +418,7 @@ async fn shorten_url(url: &str) -> Option<String> {
     return Some(res.result_url);
 }
 
-async fn get_gutendex_books(page: &u64, search: &Option<String>, topic: &Option<String>) -> Option<ProjectGutenbergBooksResponse> {
+async fn get_gutendex_books(page: &u64, search: &Option<String>, topic: &Option<String>) -> Result<ProjectGutenbergBooksResponse, StatusCode> {
     let mut base_gutendex_url = "https://gutendex.com/books/?sort=descending".to_string();
 
     if let Some(search) = search {
@@ -433,8 +433,11 @@ async fn get_gutendex_books(page: &u64, search: &Option<String>, topic: &Option<
 
     let gutendex_req = reqwest::get(&gutendex_url).await;
 
-    if let Err(_) = gutendex_req {
-        return None;
+    if let Err(err) = gutendex_req {
+        if err.status() == Some(StatusCode::NOT_FOUND) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        return Err(StatusCode::BAD_GATEWAY);
     }
 
     let gutendex_req = gutendex_req.unwrap();
@@ -442,7 +445,7 @@ async fn get_gutendex_books(page: &u64, search: &Option<String>, topic: &Option<
     let gutendex_req = gutendex_req.text().await;
 
     if let Err(_) = gutendex_req {
-        return None;
+        return Err(StatusCode::BAD_GATEWAY);
     }
 
     let gutendex_req = gutendex_req.unwrap();
@@ -450,19 +453,22 @@ async fn get_gutendex_books(page: &u64, search: &Option<String>, topic: &Option<
     let gutendex_req: serde_json::Result<ProjectGutenbergBooksResponse> = serde_json::from_str(&gutendex_req);
 
     if let Err(_) = gutendex_req {
-        return None;
+        return Err(StatusCode::BAD_GATEWAY);
     }
 
     let gutendex_req = gutendex_req.unwrap();
 
-    return Some(gutendex_req);
+    return Ok(gutendex_req);
 }
 
-async fn get_wolne_lektury_books(page: &u64, search: &Option<String>, topic: &Option<String>) -> Option<Vec<WolneLekturyBook>> {
+async fn get_wolne_lektury_books(page: &u64, search: &Option<String>, topic: &Option<String>) -> Result<Vec<WolneLekturyBook>, StatusCode> {
     let wolne_lektury_req = reqwest::get("https://wolnelektury.pl/api/books/").await;
 
-    if let Err(_) = wolne_lektury_req {
-        return None;
+    if let Err(err) = wolne_lektury_req {
+        if err.status() == Some(StatusCode::NOT_FOUND) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        return Err(StatusCode::BAD_GATEWAY);
     }
 
     let wolne_lektury_req = wolne_lektury_req.unwrap();
@@ -470,7 +476,7 @@ async fn get_wolne_lektury_books(page: &u64, search: &Option<String>, topic: &Op
     let wolne_lektury_req = wolne_lektury_req.text().await;
 
     if let Err(_) = wolne_lektury_req {
-        return None;
+        return Err(StatusCode::BAD_GATEWAY);
     }
 
     let wolne_lektury_req = wolne_lektury_req.unwrap();
@@ -478,7 +484,7 @@ async fn get_wolne_lektury_books(page: &u64, search: &Option<String>, topic: &Op
     let wolne_lektury_req: serde_json::Result<Vec<WolneLekturyBook>> = serde_json::from_str(&wolne_lektury_req);
 
     if let Err(_) = wolne_lektury_req {
-        return None;
+        return Err(StatusCode::BAD_GATEWAY);
     }
 
     let wolne_lektury_books = wolne_lektury_req.unwrap();
@@ -508,7 +514,7 @@ async fn get_wolne_lektury_books(page: &u64, search: &Option<String>, topic: &Op
     // take page of wolne lektury books
     let wolne_lektury_books = wolne_lektury_books.into_iter().skip(((page - 1) * BOOKS_PER_PAGE) as usize).take(BOOKS_PER_PAGE as usize).collect::<Vec<WolneLekturyBook>>();
 
-    return Some(wolne_lektury_books);
+    return Ok(wolne_lektury_books);
 }
 
 #[get("/books")]
@@ -532,12 +538,26 @@ async fn get_books(query: web::Query<BooksQuery>, user: BasicAuth) -> impl Respo
 
     let (gutendex_books, wolne_lektury_books) = result;
 
-    if let None = gutendex_books {
-        return HttpResponse::BadGateway().finish();
+    if let Err(code) = gutendex_books {
+        if code == StatusCode::BAD_GATEWAY {
+            return HttpResponse::BadGateway().finish();
+        }
     }
 
-    if let None = wolne_lektury_books {
-        return HttpResponse::BadGateway().finish();
+    if let Err(code) = wolne_lektury_books {
+        if code == StatusCode::BAD_GATEWAY {
+            return HttpResponse::BadGateway().finish();
+        }
+    }
+
+    if let Err(code_guten) = gutendex_books {
+        if code_guten == StatusCode::NOT_FOUND {
+            if let Err(code_wolne) = wolne_lektury_books {
+                if code_wolne == StatusCode::NOT_FOUND {
+                    return HttpResponse::NotFound().finish();
+                }
+            }
+        }
     }
 
     let gutendex_books = gutendex_books.unwrap();
@@ -571,12 +591,26 @@ async fn get_book(path: web::Path<String>, user: BasicAuth) -> impl Responder {
 
     let (gutendex_books, wolne_lektury_books) = result;
 
-    if let None = gutendex_books {
-        return HttpResponse::BadGateway().finish();
+    if let Err(code) = gutendex_books {
+        if code == StatusCode::BAD_GATEWAY {
+            return HttpResponse::BadGateway().finish();
+        }
     }
 
-    if let None = wolne_lektury_books {
-        return HttpResponse::BadGateway().finish();
+    if let Err(code) = wolne_lektury_books {
+        if code == StatusCode::BAD_GATEWAY {
+            return HttpResponse::BadGateway().finish();
+        }
+    }
+
+    if let Err(code_guten) = gutendex_books {
+        if code_guten == StatusCode::NOT_FOUND {
+            if let Err(code_wolne) = wolne_lektury_books {
+                if code_wolne == StatusCode::NOT_FOUND {
+                    return HttpResponse::NotFound().finish();
+                }
+            }
+        }
     }
 
     let gutendex_books = gutendex_books.unwrap();
